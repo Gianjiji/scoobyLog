@@ -1,6 +1,6 @@
 # scoobyLog
 
-**Analizzatore di Incidenti Splunk** — strumento Python di livello senior per elaborare export CSV da Splunk e generare report di Incident Response completi in formato Markdown o HTML.
+**Analizzatore di Incidenti SIEM** — strumento Python di livello senior per elaborare export CSV da SIEM e generare report di Incident Response completi in formato Markdown o HTML.
 
 ```
 scoobylog v4.3
@@ -8,7 +8,7 @@ scoobylog v4.3
 
 ## Cosa fa
 
-A partire da un CSV esportato da Splunk, scoobyLog esegue automaticamente:
+A partire da un CSV esportato da un SIEM, scoobyLog esegue automaticamente:
 
 - Parsing dei timestamp in qualsiasi formato (ISO 8601, Apache/nginx, syslog, epoch in secondi/ms)
 - Ordinamento cronologico e normalizzazione in UTC
@@ -47,7 +47,7 @@ python scoobylog.py --input logs.csv --format html --open
 # Riepilogo TLDR rapido su stdout (nessun file scritto)
 python scoobylog.py --input logs.csv --summary
 
-# Lettura da stdin (pipe da Splunk CLI, curl, ecc.)
+# Lettura da stdin (pipe dalla CLI del SIEM, curl, ecc.)
 cat export.csv | python scoobylog.py --input -
 
 # JSON leggibile da macchina + CSV arricchito, senza report Markdown
@@ -71,7 +71,7 @@ python scoobylog.py --input logs.csv --patterns-file pattern_custom.json
 | Flag | Predefinito | Descrizione |
 |---|---|---|
 | `CSV_FILE` | — | File di input posizionale (drag & drop) |
-| `--input / -i` | — | Percorso al CSV di Splunk (`-` per stdin) |
+| `--input / -i` | — | Percorso al CSV del SIEM (`-` per stdin) |
 | `--output / -o` | `<input>_incident_report.html` | Percorso file di output |
 | `--output-dir` | — | Cartella per tutti i file di output |
 | `--timestamp-col` | automatico | Nome colonna timestamp |
@@ -279,8 +279,8 @@ Con `--json-summary`, scoobyLog scrive `IR-<hash>.json` con:
 ## Test rapido
 
 ```bash
-python scoobylog.py sample_splunk.csv
-# → sample_splunk_incident_report.md (simulazione MySQL OOM → failure a cascata)
+python scoobylog.py sample_siem.csv
+# → sample_siem_incident_report.md (simulazione MySQL OOM → failure a cascata)
 ```
 
 Output atteso:
