@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-scoobyLog — Splunk Incident Analyzer  v4.3
+scoobyLog — SIEM Incident Analyzer  v4.3
 =============================================
 Senior Network Systems Administrator & Python Engineer utility.
 
-Processes Splunk-exported CSV logs to:
+Processes SIEM-exported CSV logs to:
   - Parse and normalize timestamps (multi-format, epoch, UTC)
   - Sort events chronologically
   - Isolate unique-key flows (session/IP/host/transaction)
@@ -21,7 +21,7 @@ Usage:
     python scoobylog.py --input logs.csv --summary        # TLDR only, stdout
 
 Options:
-    CSV_FILE / --input/-i  Path to Splunk CSV export (positional or flag)
+    CSV_FILE / --input/-i  Path to SIEM CSV export (positional or flag)
     --output/-o            Output Markdown file (default: <input>_incident_report.md)
     --output-dir           Directory for all output files
     --timestamp-col        Timestamp column name (default: auto-detect)
@@ -147,6 +147,7 @@ TIMESTAMP_FORMATS = [
     "%Y-%m-%dT%H:%M:%S.%f",
     "%Y-%m-%dT%H:%M:%S",
     "%Y-%m-%d %H:%M:%S.%f",
+    "%Y-%m-%d %H:%M:%S,%f",
     "%Y-%m-%d %H:%M:%S",
     "%d/%b/%Y:%H:%M:%S %z",
     "%b %d %H:%M:%S",
@@ -349,17 +350,11 @@ def fmt_relative_ts(ts, base_ts) -> str:
 # ---------------------------------------------------------------------------
 
 def parse_timestamp_series(series: pd.Series) -> pd.Series:
-    """Attempt multiple timestamp formats; fall back to pandas inference."""
+    """Attempt numeric epoch, explicit timestamp formats, then pandas inference."""
     if series.empty:
         return pd.Series(dtype="datetime64[ns, UTC]")
 
-    try:
-        parsed = pd.to_datetime(series, utc=True)
-        if len(series) > 0 and parsed.notna().sum() / len(series) > 0.8:
-            return parsed
-    except Exception:
-        pass
-
+    # 1) Prima gestisci epoch numerici: secondi o millisecondi.
     numeric = pd.to_numeric(series, errors="coerce")
     if len(series) > 0 and numeric.notna().sum() / len(series) > 0.8:
         median_val = numeric.median()
@@ -368,8 +363,10 @@ def parse_timestamp_series(series: pd.Series) -> pd.Series:
         elif 1e12 < median_val < 2e12:
             return pd.to_datetime(numeric, unit="ms", utc=True, errors="coerce")
 
+    # 2) Poi prova i formati espliciti, incluso quello con virgola nei millisecondi.
     best_parsed = None
     best_count = 0
+
     for fmt in TIMESTAMP_FORMATS:
         try:
             candidate = pd.to_datetime(series, format=fmt, errors="coerce", utc=True)
@@ -383,8 +380,8 @@ def parse_timestamp_series(series: pd.Series) -> pd.Series:
     if best_parsed is not None and best_count > 0:
         return best_parsed
 
+    # 3) Solo alla fine usa l'inferenza generica di pandas.
     return pd.to_datetime(series, errors="coerce", utc=True)
-
 
 # ---------------------------------------------------------------------------
 # LOG LEVEL EXTRACTION
@@ -1020,7 +1017,7 @@ def build_recovery_timeline(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 def build_network_flow_matrix(df: pd.DataFrame) -> str:
     """
     Build a src_ip → dst_ip flow matrix showing total events and error count per pair.
-    Requires src_ip and dst_ip columns (common in Splunk CIM-compliant exports).
+    Requires src_ip and dst_ip columns (common in SIEM CIM-compliant exports).
     """
     src_col = next((c for c in ("src_ip", "source_ip", "clientip", "src") if c in df.columns), None)
     dst_col = next((c for c in ("dst_ip", "dest_ip", "dest", "dst") if c in df.columns), None)
@@ -1383,7 +1380,7 @@ def build_cooccurrence_summary(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def generate_splunk_queries(
+def generate_SIEM_queries(
     df: pd.DataFrame,
     ts_col: Optional[str],
     flow_key: Optional[str],
@@ -1391,7 +1388,7 @@ def generate_splunk_queries(
     source_file: str,
 ) -> str:
     """
-    Generate multiple focused Splunk SPL queries for incident reproduction.
+    Generate multiple focused SIEM SPL queries for incident reproduction.
     Returns a Markdown-formatted string with three labelled code blocks:
       1. Full incident window (±10 min)
       2. Root-cause host focused
@@ -1744,7 +1741,7 @@ def generate_report(
 
     # Pre-compute SPL query (outside f-string for exception safety)
     try:
-        spl_query = generate_splunk_queries(df, args.timestamp_col, flow_key, root_cause, source_file)
+        spl_query = generate_SIEM_queries(df, args.timestamp_col, flow_key, root_cause, source_file)
     except Exception as e:
         spl_query = f"# Errore generazione query SPL: {e}"
 
@@ -1937,7 +1934,7 @@ def generate_report(
 
     # Executive summary text
     exec_summary_lines = [
-        f"L'analisi del log Splunk ha rilevato **{anomaly_events} eventi anomali** "
+        f"L'analisi del log SIEM ha rilevato **{anomaly_events} eventi anomali** "
         f"su **{total_events} totali** nell'intervallo {time_range}."
     ]
     if error_events > 0:
@@ -2190,7 +2187,7 @@ Basandosi sull'analisi automatica dei pattern, le cause radice identificate sono
 1. **Immediato** — Verificare lo stato del servizio/host nel flusso `{root_cause['flow_key']}`.
 2. **Breve termine** — Analizzare i log di sistema intorno a `{rc_time_str}` ±10 minuti.
 3. **Investigazione** — Correlare con metriche infrastrutturali (CPU, RAM, rete, IOPS) per lo stesso periodo.
-4. **Prevenzione** — Aggiornare le soglie di alerting Splunk per i pattern: _{", ".join(all_df_tags[:5]) or "N/A"}_.
+4. **Prevenzione** — Aggiornare le soglie di alerting SIEM per i pattern: _{", ".join(all_df_tags[:5]) or "N/A"}_.
 5. **Post-mortem** — Documentare la catena causale e validare il runbook di risposta.
 {"6. **Integrità log** — Verificare la perdita di eventi nei gap rilevati." if log_gaps else ""}
 
@@ -2218,13 +2215,13 @@ Basandosi sull'analisi automatica dei pattern, le cause radice identificate sono
 | Colonna log level | `{args.level_col or "auto-rilevata"}` |
 | Chiave flusso | `{flow_key or "auto-rilevata"}` |
 | Valore flusso target | `{args.flow_value or "auto-selezionato (più critico)"}` |
-| Campo _raw Splunk | `{"presente" if has_raw_col else "assente — campi strutturati usati"}` |
+| Campo _raw SIEM | `{"presente" if has_raw_col else "assente — campi strutturati usati"}` |
 | Versione script | `{VERSION}` |
 | SHA-256 file sorgente | `{sha256}` |
 
-### 15.3 Splunk SPL — Query di Riproduzione
+### 15.3 SIEM SPL — Query di Riproduzione
 
-Tre query mirate per la verifica rapida dell'incidente in Splunk:
+Tre query mirate per la verifica rapida dell'incidente in SIEM:
 
 {spl_query}
 
@@ -2243,30 +2240,130 @@ Tre query mirate per la verifica rapida dell'incidente in Splunk:
 # MAIN
 # ---------------------------------------------------------------------------
 
+RAW_LOG_REGEX = re.compile(
+    r'^(?P<timestamp>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[,.]\d{3,6})\s+'
+    r'(?P<level>CRITICAL|FATAL|ERROR|ERR|WARN(?:ING)?|NOTICE|INFO|DEBUG|TRACE)\s+'
+    r'(?P<logger>\[[^\]]+\])?\s*'
+    r'(?P<thread>\([^)]+\))?\s*'
+    r'(?P<message>.*)$',
+    re.IGNORECASE
+)
+
+
+def looks_like_raw_log(text: str) -> bool:
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        return RAW_LOG_REGEX.match(line) is not None
+    return False
+
+
+def parse_raw_log_text(text: str, source_file: str = "raw-log") -> pd.DataFrame:
+    rows = []
+
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+
+        match = RAW_LOG_REGEX.match(line)
+
+        if match:
+            data = match.groupdict()
+
+            level = data["level"].upper()
+            if level == "ERR":
+                level = "ERROR"
+            if level == "WARN":
+                level = "WARNING"
+
+            rows.append({
+                "timestamp": data["timestamp"],
+                "log_level": level,
+                "logger": (data.get("logger") or "").strip("[]"),
+                "thread": (data.get("thread") or "").strip("()"),
+                "message": data.get("message") or "",
+                "source": source_file,
+                "_raw": line,
+            })
+
+        else:
+            # Gestisce righe multilinea tipo stack trace:
+            # se una riga non inizia con timestamp, la accoda al messaggio precedente.
+            if rows:
+                rows[-1]["message"] += "\n" + line
+                rows[-1]["_raw"] += "\n" + line
+            else:
+                rows.append({
+                    "timestamp": None,
+                    "log_level": "UNKNOWN",
+                    "logger": "",
+                    "thread": "",
+                    "message": line,
+                    "source": source_file,
+                    "_raw": line,
+                })
+
+    return pd.DataFrame(rows)
+
 def load_csv(path: str, encoding: str = "utf-8", quiet: bool = False) -> pd.DataFrame:
     def _log(msg: str) -> None:
         if not quiet:
             print(msg)
 
-    # Stdin support: --input - reads from a pipe/redirect
+    encodings = (encoding, "utf-8-sig", "latin-1", "cp1252")
+
+    def _decode_bytes(raw: bytes):
+        for enc in encodings:
+            try:
+                return raw.decode(enc), enc
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8", errors="replace"), "utf-8-replace"
+
+    # stdin: può essere CSV oppure raw log
     if path == "-":
         try:
             import io
             raw = sys.stdin.buffer.read()
-            for enc in (encoding, "utf-8-sig", "latin-1", "cp1252"):
+            text, used_enc = _decode_bytes(raw)
+
+            if looks_like_raw_log(text):
+                df = parse_raw_log_text(text, source_file="stdin")
+                _log(f"[+] Log raw caricato da stdin: {len(df)} righe (encoding: {used_enc})")
+                return df
+
+            for enc in encodings:
                 try:
                     df = pd.read_csv(io.BytesIO(raw), encoding=enc, low_memory=False)
                     _log(f"[+] CSV caricato da stdin: {len(df)} righe, {len(df.columns)} colonne (encoding: {enc})")
                     return df
                 except UnicodeDecodeError:
                     continue
+
             print("[!] Impossibile decodificare stdin.", file=sys.stderr)
             sys.exit(1)
+
         except Exception as e:
             print(f"[!] Errore lettura stdin: {e}", file=sys.stderr)
             sys.exit(1)
 
-    for enc in (encoding, "latin-1", "cp1252", "utf-8-sig"):
+    # file normale: può essere CSV, .log, oppure senza estensione
+    try:
+        raw = Path(path).read_bytes()
+        text, used_enc = _decode_bytes(raw)
+
+        if looks_like_raw_log(text):
+            df = parse_raw_log_text(text, source_file=str(path))
+            _log(f"[+] Log raw caricato: {len(df)} righe (encoding: {used_enc})")
+            return df
+
+    except Exception as e:
+        print(f"[!] Errore lettura file: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # fallback: comportamento CSV attuale
+    for enc in encodings:
         try:
             df = pd.read_csv(path, encoding=enc, low_memory=False)
             _log(f"[+] CSV caricato: {len(df)} righe, {len(df.columns)} colonne (encoding: {enc})")
@@ -2274,11 +2371,11 @@ def load_csv(path: str, encoding: str = "utf-8", quiet: bool = False) -> pd.Data
         except UnicodeDecodeError:
             continue
         except Exception as e:
-            print(f"[!] Errore caricamento CSV: {e}", file=sys.stderr)
+            print(f"[!] Errore caricamento CSV/log: {e}", file=sys.stderr)
             sys.exit(1)
+
     print("[!] Impossibile determinare l'encoding del file.", file=sys.stderr)
     sys.exit(1)
-
 
 def detect_timestamp_col(df: pd.DataFrame) -> Optional[str]:
     for c in TIMESTAMP_CANDIDATES:
@@ -2682,7 +2779,7 @@ def render_local_ai_section(ai_result):
 
 def main():
     parser = argparse.ArgumentParser(
-        description=f"scoobyLog — Splunk Incident Analyzer v{VERSION}",
+        description=f"scoobyLog — SIEM Incident Analyzer v{VERSION}",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -2706,7 +2803,7 @@ Examples:
                         metavar="CSV_FILE",
                         help="Input CSV file (positional shortcut for --input, supports drag & drop)")
     parser.add_argument("--input",         "-i", required=False, default=None,
-                        help="Path to Splunk CSV export (use --input or the positional argument)")
+                        help="Path to SIEM CSV export (use --input or the positional argument)")
     parser.add_argument("--output",        "-o", default=None)
     parser.add_argument("--output-dir",          default=None,
                         help="Directory for all output files (overrides --output location)")

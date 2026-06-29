@@ -1,6 +1,6 @@
 # scoobyLog
 
-**Analizzatore di Incidenti SIEM** — strumento Python di livello senior per elaborare export CSV da SIEM e generare report di Incident Response completi in formato Markdown o HTML.
+**Analizzatore di Incidenti SIEM** — strumento Python di livello senior per elaborare export CSV da SIEM e log applicativi raw, anche senza estensione, generando report di Incident Response completi in formato Markdown o HTML.
 
 ```
 scoobylog v4.3
@@ -8,15 +8,15 @@ scoobylog v4.3
 
 ## Cosa fa
 
-A partire da un CSV esportato da un SIEM, scoobyLog esegue automaticamente:
+A partire da un export CSV SIEM oppure da un log applicativo raw, scoobyLog esegue automaticamente:
 
-- Parsing dei timestamp in qualsiasi formato (ISO 8601, Apache/nginx, syslog, epoch in secondi/ms)
+- Parsing dei timestamp in diversi formati (ISO 8601, Apache/nginx, syslog, epoch in secondi/ms, timestamp con millisecondi separati da virgola)
 - Ordinamento cronologico e normalizzazione in UTC
 - Isolamento del flusso più anomalo tramite chiave univoca (sessione, request ID, IP sorgente, ...)
 - Rilevamento anomalie via regex: OOM, segfault, disco pieno, timeout, fallimenti di autenticazione, stack trace, slow query, pool esaurito e altro
 - Identificazione della **root cause** — il primo errore della catena — con misurazione della profondità della cascata
 - Calcolo del **MTTR** (Mean Time To Recover) e rilevamento **violazione SLA** (P1–P4)
-- Generazione di un **Report di Incident Response** completo con timeline, catena di eventi ASCII, evidenze di rete, matrice di impatto per host, analisi RCA, query SPL per riproduzione dell'incidente e playbook tecnico
+- Generazione di un **Report di Incident Response** completo con timeline, catena di eventi ASCII, evidenze di rete, matrice di impatto per host, analisi RCA, query SIEM per riproduzione dell'incidente e playbook tecnico
 
 ## Requisiti
 
@@ -41,14 +41,21 @@ python scoobylog.py logs.csv
 # Forma con flag
 python scoobylog.py --input logs.csv
 
+# Log raw senza estensione
+python scoobylog.py --input application_log
+
+# Log raw con estensione .log
+python scoobylog.py --input application.log
+
 # Report HTML, aperto nel browser
 python scoobylog.py --input logs.csv --format html --open
 
 # Riepilogo TLDR rapido su stdout (nessun file scritto)
 python scoobylog.py --input logs.csv --summary
 
-# Lettura da stdin (pipe dalla CLI del SIEM, curl, ecc.)
+# Lettura da stdin (pipe dalla CLI del SIEM, curl, cat, ecc.)
 cat export.csv | python scoobylog.py --input -
+cat application_log | python scoobylog.py --input -
 
 # JSON leggibile da macchina + CSV arricchito, senza report Markdown
 python scoobylog.py --input logs.csv --no-report --json-summary --export-csv arricchito.csv
@@ -66,12 +73,41 @@ python scoobylog.py --input logs.csv --alert-webhook https://hooks.example.com/i
 python scoobylog.py --input logs.csv --patterns-file pattern_custom.json
 ```
 
+## Formati di input supportati
+
+scoobyLog accetta sia input strutturati sia log raw:
+
+| Formato | Esempio | Note |
+|---|---|---|
+| CSV SIEM | `logs.csv` | Mantiene il comportamento storico con auto-rilevamento colonne |
+| Log raw senza estensione | `application_log` | Riconosciuto dal contenuto, non dall'estensione |
+| Log raw `.log` | `application.log` | Righe applicative classiche con timestamp + livello + messaggio |
+| stdin | `cat logs.csv \| python scoobylog.py --input -` | Supporta sia CSV sia raw log |
+
+Formato raw riconosciuto:
+
+```text
+2026-04-26 00:00:00,030 INFO  [stdout] (default task-10090) log4j: setFile ended
+```
+
+Il parser raw estrae automaticamente:
+
+- `timestamp`
+- `log_level`
+- `logger`
+- `thread`
+- `message`
+- `source`
+- `_raw`
+
+Le righe multilinea che non iniziano con timestamp vengono accodate al messaggio precedente, utile per stack trace o eccezioni spezzate su più righe.
+
 ## Riferimento opzioni CLI
 
 | Flag | Predefinito | Descrizione |
 |---|---|---|
-| `CSV_FILE` | — | File di input posizionale (drag & drop) |
-| `--input / -i` | — | Percorso al CSV del SIEM (`-` per stdin) |
+| `INPUT_FILE` | — | File di input posizionale: CSV SIEM, log raw `.log` o file senza estensione |
+| `--input / -i` | — | Percorso al file di input: CSV SIEM o log raw (`-` per stdin) |
 | `--output / -o` | `<input>_incident_report.html` | Percorso file di output |
 | `--output-dir` | — | Cartella per tutti i file di output |
 | `--timestamp-col` | automatico | Nome colonna timestamp |
@@ -79,7 +115,7 @@ python scoobylog.py --input logs.csv --patterns-file pattern_custom.json
 | `--flow-key` | automatico | Colonna chiave di flusso univoca |
 | `--flow-value` | automatico (più anomalo) | Valore di flusso specifico da isolare |
 | `--no-flow` | disattivo | Disabilita l'isolamento del flusso |
-| `--encoding` | utf-8 | Encoding del file CSV |
+| `--encoding` | utf-8 | Encoding del file di input |
 | `--max-rows` | 30 | Numero massimo di righe nella tabella timeline |
 | `--chain-depth` | 12 | Numero massimo di eventi nella catena ASCII |
 | `--since` | — | Scarta eventi precedenti a questo timestamp ISO 8601 |
@@ -209,7 +245,7 @@ python scoobyLog.py logs.csv --local-ai --local-ai-model mistral:7b --local-ai-e
 §12 Estratti Log Raw (top 5 errori, ordinati per severità)
 §13 RCA + §13.1 Evento root + §13.2 Cascata + §13.3 Cross-Host + §13.4 Lista cause
 §14 Azioni Raccomandate + §14.1 Playbook Tecnico (rimedi per pattern)
-§15 Appendice — §15.1 Colonne + §15.2 Parametri + §15.3 Query SPL (×3)
+§15 Appendice — §15.1 Colonne + §15.2 Parametri + §15.3 Query SIEM (×3)
 ```
 
 ## Pattern personalizzati
@@ -279,8 +315,14 @@ Con `--json-summary`, scoobyLog scrive `IR-<hash>.json` con:
 ## Test rapido
 
 ```bash
+# Test CSV
 python scoobylog.py sample_siem.csv
-# → sample_siem_incident_report.md (simulazione MySQL OOM → failure a cascata)
+
+# Test log raw senza estensione
+python scoobylog.py application_log
+
+# Test stdin
+cat application_log | python scoobylog.py --input -
 ```
 
 Output atteso:
@@ -289,6 +331,14 @@ Output atteso:
 [✓] Root cause: ERROR @ 2024-03-15T08:01:45Z su lb-01 (timeout)
 [✓] Cascata: 10 errori downstream | MTTR: 1m 15s
 [✓] Severity: 62/100 — P2 ALTO
+```
+
+Per i log raw, l'output atteso include il riconoscimento automatico del formato:
+
+```text
+[+] Log raw caricato: <N> righe (encoding: utf-8)
+[+] Colonna timestamp : 'timestamp'
+[+] Colonna log level : 'log_level'
 ```
 
 ## Licenza
