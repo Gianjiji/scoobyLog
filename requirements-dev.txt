@@ -1,0 +1,7 @@
+# Dipendenze per eseguire la suite di test (non servono per usare lo strumento).
+-r requirements.txt
+pytest>=8.0
+markdown-it-py>=3.0     # parser CommonMark indipendente, per verificare il Markdown generato
+
+# Facoltativo: test nel browser reale (saltati se assente).
+#   pip install playwright && playwright install chromium

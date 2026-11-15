@@ -349,17 +349,42 @@ Con `--json-summary`, scoobyLog scrive `IR-<hash>.json` con:
 `local_ai` è il blocco compatto del layer AI (vedi sezione dedicata); `diagnosis`
 è presente solo con `--diagnose`, altrimenti è `null`.
 
-## Test rapido
+## Sicurezza del report HTML
+
+Il report è costruito a partire dai log, e durante un incidente i log possono contenere
+testo scelto da chi attacca. Per questo nulla di ciò che arriva dai log viene mai
+interpretato come markup:
+
+- **Nel Markdown**: host, messaggi, IP, valori dei campi e nomi di colonna passano da
+  `md_code` / `md_text` / `md_fence`, che impediscono al contenuto di chiudere in anticipo
+  uno span o un blocco di codice e di aprire tag, link o celle di tabella.
+- **Nella pagina**: l'HTML grezzo presente nel Markdown viene stampato come testo; il
+  risultato del rendering passa da una allow-list (solo gli elementi che il Markdown
+  produce davvero) prima di essere inserito nella pagina; una Content-Security-Policy
+  vieta qualunque script che non sia quello della pagina e qualunque richiesta verso
+  origini diverse dalla CDN.
+- **Risorse esterne**: `marked.js` e `highlight.js` sono caricati da cdnjs, fissati per
+  versione e per hash (Subresource Integrity). Senza rete il report resta leggibile:
+  viene mostrato come Markdown in testo semplice.
+
+## Test
 
 ```bash
-# Suite di smoke test (mock Ollama incluso — nessun server richiesto)
-python test_local_ai.py
-# → ALL TESTS PASSED
+pip install -r requirements-dev.txt
+pytest
+```
 
+La suite copre le funzioni di escape, la struttura e i conteggi del report su un CSV di
+esempio, e l'iniezione di HTML/JavaScript da log ostili. I test che aprono il report in
+un browser vero richiedono in più `pip install playwright && playwright install chromium`;
+se Playwright non è installato vengono saltati.
+
+```bash
 # Analisi di un qualsiasi export CSV del SIEM
 python scoobyLog.py logs.csv --diagnose
 # → logs_incident_report.html + blocco DIAGNOSI su stdout
 ```
+
 
 ## Licenza
 

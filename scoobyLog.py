@@ -69,6 +69,78 @@ import numpy as np
 
 VERSION = "4.4"
 
+
+# ---------------------------------------------------------------------------
+# MARKDOWN-SAFE EMBEDDING OF LOG DATA
+# ---------------------------------------------------------------------------
+# Everything that comes out of the analysed logs (hosts, messages, IPs, field
+# values, even column names) is text chosen by whoever wrote those logs, which
+# during an incident may well be the attacker. The report is Markdown that a
+# browser later turns into HTML, so that text must reach the page as *data*:
+# never as Markdown structure, never as markup. These three helpers are the
+# only way log data should be placed into the report.
+
+_BACKTICK_RUN_RE = re.compile(r"`+")
+_MD_ACTIVE_RE = re.compile(r"([\\`\[\]<>|])")
+_LINE_BREAKS_RE = re.compile(r"[\r\n\t\v\f\x1c-\x1e\x85\u2028\u2029]+")
+
+
+def md_code(value, max_len: Optional[int] = None, cell: bool = False) -> str:
+    """Inline code span whose content cannot close the span early.
+
+    A value wrapped as `value` escapes the span as soon as it contains a
+    backtick, and whatever follows is then parsed as Markdown/HTML. CommonMark
+    closes a span only with a backtick run of the same length as the opening
+    one, so the delimiter used here is one backtick longer than the longest run
+    in the value. For ordinary values the output is exactly `value`.
+
+    cell=True is for values placed inside a table row: a pipe splits the row
+    even inside a code span, and GFM un-escapes ``\\|`` before inline parsing.
+    """
+    text = "" if value is None else str(value)
+    if max_len is not None:
+        text = text[:max_len]
+    text = _LINE_BREAKS_RE.sub(" ", text)
+    if cell:
+        text = text.replace("|", "\\|")
+    longest = max((len(run) for run in _BACKTICK_RUN_RE.findall(text)), default=0)
+    fence = "`" * (longest + 1)
+    if not text.strip():
+        return f"{fence} {fence}"
+    if longest or text[0] == " " or text[-1] == " ":
+        return f"{fence} {text} {fence}"   # one space each side is stripped by the renderer
+    return f"{fence}{text}{fence}"
+
+
+def md_text(value, max_len: Optional[int] = None, cell: bool = False) -> str:
+    """Plain text for running prose or a table cell, shown literally.
+
+    Backslash-escapes the characters that would otherwise start a code span, a
+    link or image, an HTML tag or a new table cell. Emphasis markers are left
+    alone: at worst a log line shows up in italics.
+    """
+    text = "" if value is None else str(value)
+    if max_len is not None:
+        text = text[:max_len]
+    text = _LINE_BREAKS_RE.sub(" ", text)
+    text = _MD_ACTIVE_RE.sub(r"\\\1", text)
+    if not cell:
+        text = text.replace("\\|", "|")   # a pipe only matters inside a table
+    return text
+
+
+def md_fence(text, lang: str = "") -> str:
+    """Fenced code block that the content cannot close early.
+
+    A log line made of three backticks would end a ``` block and hand the rest
+    of the event to the Markdown parser. The fence used is longer than any
+    backtick run found in the content.
+    """
+    body = "" if text is None else str(text)
+    longest = max((len(run) for run in _BACKTICK_RUN_RE.findall(body)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}{lang}\n{body}\n{fence}"
+
 # ---------------------------------------------------------------------------
 # CONFIGURATION – tune these regexes for your environment
 # ---------------------------------------------------------------------------
@@ -285,7 +357,7 @@ def build_response_playbook(detected_tags: list) -> str:
             continue
         label  = CAUSE_LABELS.get(tag, tag.replace("_", " ").title())
         header = label.replace("**", "").split("—")[0].strip()
-        lines  = [f"#### Pattern: `{tag}` — {header}"]
+        lines  = [f"#### Pattern: {md_code(tag)} — {header}"]
         for i, step in enumerate(steps, 1):
             lines.append(f"  {i}. {step}")
         sections.append("\n".join(lines))
@@ -423,7 +495,7 @@ def severity_rank(level: str) -> int:
 
 def extract_network_evidence(df: pd.DataFrame) -> dict:
     evidence = {k: set() for k in NETWORK_PATTERNS}
-    text_cols = df.select_dtypes(include="object").columns
+    text_cols = df.select_dtypes(include=["object", "string"]).columns
 
     for col in text_cols:
         combined = df[col].dropna().astype(str)
@@ -453,7 +525,7 @@ def detect_anomalies(df: pd.DataFrame, level_col_name: str = "_log_level") -> pd
             df[f"_anomaly_{net_name}"] = pd.Series(dtype="bool")
         return df
 
-    text_cols = df.select_dtypes(include="object").columns
+    text_cols = df.select_dtypes(include=["object", "string"]).columns
 
     df["_raw_combined"] = df[text_cols].fillna("").apply(
         lambda row: " ".join(row.astype(str)), axis=1
@@ -577,7 +649,7 @@ def detect_flow_key(df: pd.DataFrame, hint: Optional[str] = None) -> Optional[st
                 if 1 < nuniq < len(df) * 0.9:
                     return col
 
-    obj_cols = df.select_dtypes(include="object").columns
+    obj_cols = df.select_dtypes(include=["object", "string"]).columns
     for col in obj_cols:
         if col.startswith("_"):
             continue
@@ -826,7 +898,7 @@ def build_service_impact(df: pd.DataFrame) -> str:
     if col is None:
         return "_Colonna sourcetype/source assente._"
 
-    lines = [f"| {col} | Stato | err_% | Errori | Warning |", "|---|---|---|---|---|"]
+    lines = [f"| {md_text(col, cell=True)} | Stato | err_% | Errori | Warning |", "|---|---|---|---|---|"]
     for src, group in df.groupby(col):
         total    = len(group)
         errors   = int(group["_is_error"].sum())
@@ -840,7 +912,7 @@ def build_service_impact(df: pd.DataFrame) -> str:
             status = "**DEGRADED**"
         else:
             status = "OK"
-        lines.append(f"| `{src}` | {status} | {err_pct:.1f}% | {errors} | {warnings} |")
+        lines.append(f"| {md_code(src, cell=True)} | {status} | {err_pct:.1f}% | {errors} | {warnings} |")
 
     return "\n".join(lines)
 
@@ -908,8 +980,8 @@ def detect_sla_breach(mttr, severity_grade: str) -> Optional[str]:
             if threshold and mttr_secs > threshold:
                 sla_str = fmt_duration(pd.Timedelta(seconds=threshold))
                 return (
-                    f"⚠️ **SLA BREACH** — MTTR `{fmt_duration(mttr)}` supera la soglia {priority} "
-                    f"di `{sla_str}` (SoP standard)"
+                    f"⚠️ **SLA BREACH** — MTTR {md_code(fmt_duration(mttr))} supera la soglia {priority} "
+                    f"di {md_code(sla_str)} (SoP standard)"
                 )
             return None
     return None
@@ -978,7 +1050,8 @@ def detect_cross_host_cascade(df: pd.DataFrame, window_seconds: float = 2.0) -> 
     lines = ["| Inizio | Host (ordine) | Livelli | Trigger |", "|---|---|---|---|"]
     for g in groups[:10]:
         lines.append(
-            f"| `{g['Inizio']}` | `{g['Host (ordine)']}` | {g['Livelli']} | {g['Trigger'][:60]} |"
+            f"| {md_code(g['Inizio'], cell=True)} | {md_code(g['Host (ordine)'], cell=True)} "
+            f"| {md_text(g['Livelli'], cell=True)} | {md_text(g['Trigger'], 60, cell=True)} |"
         )
     return "\n".join(lines)
 
@@ -1043,7 +1116,7 @@ def build_network_flow_matrix(df: pd.DataFrame) -> str:
 
     lines = ["| src_ip | dst_ip | Totale | Errori | err_% |", "|---|---|---|---|---|"]
     for _, r in matrix.iterrows():
-        lines.append(f"| `{r['src_ip']}` | `{r['dst_ip']}` | {r['Total']} | {r['Errori']} | {r['err_%']} |")
+        lines.append(f"| {md_code(r['src_ip'], cell=True)} | {md_code(r['dst_ip'], cell=True)} | {r['Total']} | {r['Errori']} | {r['err_%']} |")
     return "\n".join(lines)
 
 
@@ -1095,9 +1168,9 @@ def build_sourcetype_breakdown(df: pd.DataFrame) -> str:
     )
     agg["err_%"] = (agg["errors"] / agg["total"] * 100).round(1).astype(str) + "%"
 
-    lines = [f"| {col} | Totale | Errori | Warning | err_% |", "|---|---|---|---|---|"]
+    lines = [f"| {md_text(col, cell=True)} | Totale | Errori | Warning | err_% |", "|---|---|---|---|---|"]
     for _, r in agg.iterrows():
-        lines.append(f"| `{r[col]}` | {r['total']} | {r['errors']} | {r['warnings']} | {r['err_%']} |")
+        lines.append(f"| {md_code(r[col], cell=True)} | {r['total']} | {r['errors']} | {r['warnings']} | {r['err_%']} |")
     return "\n".join(lines)
 
 
@@ -1131,7 +1204,7 @@ def build_top_errors(df: pd.DataFrame, top_n: int = 5) -> str:
 
     lines = ["| # | Messaggio (normalizzato) | Occorrenze |", "|---|---|---|"]
     for i, (msg, cnt) in enumerate(counts.items(), 1):
-        lines.append(f"| {i} | `{str(msg)[:120]}` | {cnt} |")
+        lines.append(f"| {i} | {md_code(str(msg)[:120], cell=True)} | {cnt} |")
     if counts.max() == 1:
         lines.append("\n> _Tutti gli errori sono eventi unici — nessun pattern ricorrente rilevato._")
     return "\n".join(lines)
@@ -1166,7 +1239,7 @@ def build_incident_narrative(
         warn_host = first_warn.get("host", "N/A")
         warn_msg  = str(first_warn.get("message", ""))[:100]
         paragraphs.append(
-            f"Alle **{warn_ts}** il sistema ha mostrato i primi segnali di degrado su `{warn_host}`: "
+            f"Alle **{warn_ts}** il sistema ha mostrato i primi segnali di degrado su {md_code(warn_host)}: "
             f"_{warn_msg}_."
         )
 
@@ -1178,8 +1251,8 @@ def build_incident_narrative(
     rc_tags = root_cause.get("anomaly_tags", [])
     tag_str = f" con pattern _{', '.join(rc_tags[:3])}_" if rc_tags else ""
     paragraphs.append(
-        f"Il **primo errore** (T+0) è stato rilevato alle **{rc_ts}** su `{rc_host}` "
-        f"(livello: `{rc_lvl}`){tag_str}."
+        f"Il **primo errore** (T+0) è stato rilevato alle **{rc_ts}** su {md_code(rc_host)} "
+        f"(livello: {md_code(rc_lvl)}){tag_str}."
     )
 
     # Cascade
@@ -1198,7 +1271,7 @@ def build_incident_narrative(
         prec_host  = first_prec.get("host", "N/A")
         prec_msg   = str(first_prec.get("message", first_prec.get("_raw", "")))[:100]
         paragraphs.append(
-            f"**Evento precursore rilevato** alle {prec_ts} su `{prec_host}`: "
+            f"**Evento precursore rilevato** alle {prec_ts} su {md_code(prec_host)}: "
             f"_{prec_msg}_ — il degrado era in corso prima del primo errore formale."
         )
 
@@ -1207,7 +1280,7 @@ def build_incident_narrative(
         b = bursts[0]
         paragraphs.append(
             f"Il **picco dell'incidente** si è verificato nella finestra "
-            f"`{b['start']}` — `{b['end']}` con **{b['events']} eventi** "
+            f"{md_code(b['start'])} — {md_code(b['end'])} con **{b['events']} eventi** "
             f"(z-score: {b['z_score']}, {b['rate_factor']}× la densità normale)."
         )
 
@@ -1225,7 +1298,7 @@ def build_incident_narrative(
         if recovery_timeline is not None and not recovery_timeline.empty:
             slowest = recovery_timeline.sort_values("# Errori", ascending=False).iloc[0]
             paragraphs.append(
-                f"L'host più colpito è stato `{slowest['Host']}` "
+                f"L'host più colpito è stato {md_code(slowest['Host'])} "
                 f"con **{slowest['# Errori']} errori** e un downtime di **{slowest['Downtime']}**."
             )
     else:
@@ -1259,14 +1332,14 @@ def _md_table(df: pd.DataFrame, max_rows: int = 20,
         display_cols = ["Timestamp"] + display_cols
 
     sub = sub[display_cols].fillna("")
-    for col in sub.select_dtypes(include="object").columns:
+    for col in sub.select_dtypes(include=["object", "string"]).columns:
         sub[col] = sub[col].astype(str).str[:100]
 
-    header    = "| " + " | ".join(str(c) for c in sub.columns) + " |"
+    header    = "| " + " | ".join(md_text(c, cell=True) for c in sub.columns) + " |"
     separator = "| " + " | ".join("---" for _ in sub.columns) + " |"
     rows = []
     for _, row in sub.iterrows():
-        cells = " | ".join(str(v).replace("|", "¦").replace("\n", " ") for v in row)
+        cells = " | ".join(md_text(v, cell=True) for v in row)
         rows.append(f"| {cells} |")
     return "\n".join([header, separator] + rows)
 
@@ -1295,7 +1368,7 @@ def _build_ascii_chain(df: pd.DataFrame, max_events: int = 12,
     else:
         chain_df = anom.head(max_events).reset_index(drop=True)
 
-    lines = ["```"]
+    lines = []
     for i, (_, row) in enumerate(chain_df.iterrows()):
         if i > 0:
             prev_ts = chain_df.loc[i - 1, "_timestamp_parsed"]
@@ -1328,8 +1401,8 @@ def _build_ascii_chain(df: pd.DataFrame, max_events: int = 12,
             lines.append(f"{'':22}{connector}  ↳ tags: {tags}")
         elif not is_last:
             lines.append(f"{'':22}│")
-    lines.append("```")
-    return "\n".join(lines)
+    # Each event stays on its own line of the diagram, whatever the log message held.
+    return md_fence("\n".join(_LINE_BREAKS_RE.sub(" ", line) for line in lines))
 
 
 def _build_cause_list(tags: list, error_only_tags: list, rc_level: str) -> str:
@@ -1379,7 +1452,7 @@ def build_cooccurrence_summary(df: pd.DataFrame) -> str:
     pairs.sort(key=lambda x: x[2], reverse=True)
     lines = ["| Pattern A | Pattern B | Co-occorrenze |\n|---|---|---|"]
     for t1, t2, count in pairs[:10]:
-        lines.append(f"| `{t1}` | `{t2}` | {count} |")
+        lines.append(f"| {md_code(t1, cell=True)} | {md_code(t2, cell=True)} | {count} |")
     return "\n".join(lines)
 
 
@@ -1477,9 +1550,9 @@ def generate_splunk_queries(
     )
 
     blocks = [
-        f"**Query 1 — Finestra Incidente Completa** (RC @ `{t_rc_str}`, ±10 min)\n```spl\n{q1}\n```",
-        f"**Query 2 — Host Root Cause** (`{rc_host or 'N/A'}`, ±5 min)\n```spl\n{q2}\n```",
-        f"**Query 3 — Pattern Specifico** (`{q3_label}`)\n```spl\n{q3}\n```",
+        f"**Query 1 — Finestra Incidente Completa** (RC @ {md_code(t_rc_str)}, ±10 min)\n{md_fence(q1, 'spl')}",
+        f"**Query 2 — Host Root Cause** ({md_code(rc_host or 'N/A')}, ±5 min)\n{md_fence(q2, 'spl')}",
+        f"**Query 3 — Pattern Specifico** ({md_code(q3_label)})\n{md_fence(q3, 'spl')}",
     ]
     return "\n\n".join(blocks)
 
@@ -1504,8 +1577,6 @@ def anonymize_report(text: str) -> str:
     _sid_re    = re.compile(r'\b(?:sess|trace|req|txn|trx|span)-[A-Za-z0-9_\-]{3,64}\b', re.IGNORECASE)
     _email_re  = re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b')
 
-    _counters: dict = {}
-
     def _replace(pattern: re.Pattern, prefix: str, s: str) -> str:
         mapping: dict = {}
         counter = itertools.count(1)
@@ -1527,78 +1598,226 @@ def anonymize_report(text: str) -> str:
 # HTML OUTPUT
 # ---------------------------------------------------------------------------
 
+# Pinned CDN assets. The integrity value is the SHA-512 of the exact file: if the CDN
+# ever serves different bytes the browser refuses to run them.
+_CDN = "https://cdnjs.cloudflare.com"
+_MARKED_URL = _CDN + "/ajax/libs/marked/9.1.6/marked.min.js"
+_MARKED_SRI = "sha512-pmjEJQ7CveksANaAKdCJZMig7eAcCFFzE1b5XnlnxdB/vU3AOStJ5SF7w4tFuqskuU31ETnAaWTYRQOYg2WHKw=="
+_HLJS_URL = _CDN + "/ajax/libs/highlight.js/11.9.0/highlight.min.js"
+_HLJS_SRI = "sha512-D9gUyxqja7hBtkWpPWGt9wfbfaMGVt9gnyCvYa+jojwwPHLCzUm5i8rpk7vD7wNee9bA35eYIjobYPaQuKS1MQ=="
+_HLJS_CSS_URL = _CDN + "/ajax/libs/highlight.js/11.9.0/styles/github.min.css"
+_HLJS_CSS_SRI = "sha512-0aPQyyeZrWj9sCA46UlmWgKOP0mUipLQ6OZXu8l4IcAmD2u31EPEy9VcIMvl7SoAaKe8bLXZhYoMaE/in+gcgA=="
+
+_REPORT_CSS = """
+  :root {
+    --accent: __ACCENT__;
+    --bg: #f8f9fa; --fg: #212529; --card: #ffffff;
+    --border: #dee2e6; --code-bg: #f1f3f5;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+         background: var(--bg); color: var(--fg); margin: 0; padding: 0; }
+  #banner { background: var(--accent); color: #fff; padding: .6rem 2rem;
+             font-size: .85rem; display: flex; justify-content: space-between; }
+  #content { max-width: 1100px; margin: 2rem auto; padding: 0 1.5rem 4rem; }
+  h1 { border-bottom: 3px solid var(--accent); padding-bottom: .4rem; }
+  h2 { border-bottom: 1px solid var(--border); padding-bottom: .2rem; margin-top: 2.5rem; }
+  h3 { margin-top: 1.8rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .9rem; }
+  th { background: var(--accent); color: #fff; padding: .5rem .8rem; text-align: left; }
+  td { padding: .45rem .8rem; border-bottom: 1px solid var(--border); }
+  tr:nth-child(even) td { background: var(--code-bg); }
+  code { background: var(--code-bg); border-radius: 3px; padding: .1em .35em;
+          font-family: 'SFMono-Regular',Consolas,monospace; font-size: .88em; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px;
+        padding: 1rem; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  pre.plain { white-space: pre-wrap; }
+  .notice { border-left: 4px solid var(--accent); padding: .5rem 1rem; background: var(--card); }
+  blockquote { border-left: 4px solid var(--accent); margin: 1rem 0;
+                padding: .5rem 1rem; background: var(--card); }
+  a { color: var(--accent); }
+  @media print { #banner { display:none; } }
+"""
+
+# The page script. Kept free of anything that varies per report, so that its hash can
+# be listed in the Content-Security-Policy and no other inline script can ever run.
+_REPORT_SCRIPT = r"""
+(function () {
+  'use strict';
+  var source = document.getElementById('md-source').textContent;
+  var target = document.getElementById('rendered');
+
+  function put(nodes) {
+    while (target.firstChild) { target.removeChild(target.firstChild); }
+    for (var i = 0; i < nodes.length; i++) { target.appendChild(nodes[i]); }
+  }
+
+  // Offline, or the CDN is blocked: the whole report is still in this file, so show
+  // it as the plain Markdown it is instead of an empty page.
+  function showPlain(reason) {
+    var note = document.createElement('p');
+    note.className = 'notice';
+    note.textContent = reason;
+    var pre = document.createElement('pre');
+    pre.className = 'plain';
+    pre.textContent = source;
+    put([note, pre]);
+  }
+
+  if (typeof marked === 'undefined' || typeof marked.parse !== 'function') {
+    showPlain('Renderer Markdown non disponibile (offline o CDN bloccata): ' +
+              'il report viene mostrato come testo semplice.');
+    return;
+  }
+
+  function escapeHtml(text) {
+    return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  // Layer 1. HTML found inside the Markdown is log data, never markup: print it.
+  marked.use({
+    gfm: true,
+    breaks: true,
+    renderer: {
+      html: function (html) {
+        var raw = typeof html === 'string' ? html : (html && (html.raw || html.text)) || '';
+        return escapeHtml(raw);
+      }
+    }
+  });
+
+  // Layer 2. Allow-list. The rendered HTML is parsed inside a <template>, which is
+  // inert (nothing loads, nothing runs), and only the elements and attributes that
+  // Markdown itself produces are let through. Anything else is shown as text.
+  var XHTML = 'http://www.w3.org/1999/xhtml';
+  var TAGS = { H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1, P: 1, BR: 1, HR: 1, EM: 1, STRONG: 1,
+               DEL: 1, CODE: 1, PRE: 1, BLOCKQUOTE: 1, UL: 1, OL: 1, LI: 1, TABLE: 1, THEAD: 1,
+               TBODY: 1, TR: 1, TH: 1, TD: 1, A: 1, INPUT: 1 };
+  var ATTRS = { A: ['href', 'title'], TH: ['align'], TD: ['align'], CODE: ['class'],
+                OL: ['start'], INPUT: ['type', 'checked', 'disabled'] };
+  var SAFE_HREF = /^(https?:|mailto:|#)/i;
+
+  function asText(el) {
+    el.parentNode.replaceChild(document.createTextNode(el.outerHTML), el);
+  }
+
+  function clean(root) {
+    var all = root.querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (!el.parentNode) { continue; }
+      var tag = el.tagName;
+      if (el.namespaceURI !== XHTML || TAGS[tag] !== 1) { asText(el); continue; }
+      if (tag === 'INPUT' && el.getAttribute('type') !== 'checkbox') { asText(el); continue; }
+      var allowed = ATTRS[tag] || [];
+      for (var j = el.attributes.length - 1; j >= 0; j--) {
+        var name = el.attributes[j].name;
+        if (allowed.indexOf(name) === -1) { el.removeAttribute(name); }
+      }
+      if (tag === 'A') {
+        var href = (el.getAttribute('href') || '').replace(/[\u0000- ]+/g, '');
+        if (SAFE_HREF.test(href)) { el.setAttribute('rel', 'noopener noreferrer'); }
+        else { el.removeAttribute('href'); }
+      }
+      if (tag === 'CODE' && !/^language-[\w-]+$/.test(el.getAttribute('class') || '')) {
+        el.removeAttribute('class');
+      }
+      if (tag === 'INPUT') { el.setAttribute('disabled', ''); }
+    }
+  }
+
+  var template = document.createElement('template');
+  try {
+    template.innerHTML = marked.parse(source);
+    clean(template.content);
+  } catch (error) {
+    showPlain('Errore durante il rendering del report: viene mostrato come testo semplice.');
+    return;
+  }
+  put(Array.prototype.slice.call(template.content.childNodes));
+
+  if (typeof hljs !== 'undefined') {
+    var blocks = target.querySelectorAll('pre code');
+    for (var k = 0; k < blocks.length; k++) {
+      try { hljs.highlightElement(blocks[k]); } catch (ignored) { /* plain is fine */ }
+    }
+  }
+})();
+"""
+
+
+def _report_csp() -> str:
+    """Content-Security-Policy for the HTML report.
+
+    The last line of defence: even if hostile log text got past the Markdown
+    escaping and the allow-list, the browser would still refuse to run it. Scripts
+    are limited to the two pinned CDN files and to the one inline script whose
+    hash is listed here (inline event handlers such as onerror= are therefore
+    refused), and nothing may be fetched from any other origin, images included.
+    """
+    import base64
+    digest = hashlib.sha256(_REPORT_SCRIPT.encode("utf-8")).digest()
+    script_hash = base64.b64encode(digest).decode("ascii")
+    return "; ".join([
+        "default-src 'none'",
+        f"script-src {_CDN} 'sha256-{script_hash}'",
+        f"style-src {_CDN} 'unsafe-inline'",
+        "img-src data:",
+        "base-uri 'none'",
+        "form-action 'none'",
+    ])
+
+
 def wrap_html(markdown_content: str, incident_id: str, severity_grade: str) -> str:
     """
-    Wrap a Markdown report string in a self-contained HTML page.
-    Uses marked.js (CDN) to render Markdown client-side and highlight.js for code blocks.
+    Wrap a Markdown report string in a single HTML file.
+
+    The Markdown is embedded as escaped text and rendered in the browser by
+    marked.js, with highlight.js for code blocks; both come from a CDN, pinned by
+    version and by Subresource Integrity hash. Without network access the page
+    falls back to showing the report as plain Markdown, so the file is always
+    readable on its own even if not always pretty.
+
+    The report is built from log data, which is untrusted, so the page defends
+    itself in depth: raw HTML in the Markdown is printed rather than interpreted,
+    the rendered output goes through an allow-list before it is attached to the
+    page, and a Content-Security-Policy forbids any script but the page's own.
     No Python dependencies required beyond the stdlib html module.
     """
     import html as _html
     escaped = _html.escape(markdown_content)
+    title = _html.escape(str(incident_id))
     severity_color = {
         "P1": "#e74c3c", "P2": "#e67e22", "P3": "#f1c40f", "P4": "#2ecc71"
     }.get(severity_grade[:2] if severity_grade else "", "#3498db")
+    css = _REPORT_CSS.replace("__ACCENT__", severity_color)
+    csp = _html.escape(_report_csp(), quote=True)
 
     return f"""<!DOCTYPE html>
 <html lang="it">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="{csp}">
+<meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>scoobyLog — {incident_id}</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
-<style>
-  :root {{
-    --accent: {severity_color};
-    --bg: #f8f9fa; --fg: #212529; --card: #ffffff;
-    --border: #dee2e6; --code-bg: #f1f3f5;
-  }}
-  * {{ box-sizing: border-box; }}
-  body {{ font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-         background: var(--bg); color: var(--fg); margin: 0; padding: 0; }}
-  #banner {{ background: var(--accent); color: #fff; padding: .6rem 2rem;
-             font-size: .85rem; display: flex; justify-content: space-between; }}
-  #content {{ max-width: 1100px; margin: 2rem auto; padding: 0 1.5rem 4rem; }}
-  h1 {{ border-bottom: 3px solid var(--accent); padding-bottom: .4rem; }}
-  h2 {{ border-bottom: 1px solid var(--border); padding-bottom: .2rem; margin-top: 2.5rem; }}
-  h3 {{ margin-top: 1.8rem; }}
-  table {{ border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .9rem; }}
-  th {{ background: var(--accent); color: #fff; padding: .5rem .8rem; text-align: left; }}
-  td {{ padding: .45rem .8rem; border-bottom: 1px solid var(--border); }}
-  tr:nth-child(even) td {{ background: var(--code-bg); }}
-  code {{ background: var(--code-bg); border-radius: 3px; padding: .1em .35em;
-          font-family: 'SFMono-Regular',Consolas,monospace; font-size: .88em; }}
-  pre {{ background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px;
-        padding: 1rem; overflow-x: auto; }}
-  pre code {{ background: none; padding: 0; }}
-  blockquote {{ border-left: 4px solid var(--accent); margin: 1rem 0;
-                padding: .5rem 1rem; background: var(--card); }}
-  a {{ color: var(--accent); }}
-  @media print {{ #banner {{ display:none; }} }}
-</style>
+<title>scoobyLog — {title}</title>
+<link rel="stylesheet" href="{_HLJS_CSS_URL}" integrity="{_HLJS_CSS_SRI}" crossorigin="anonymous">
+<style>{css}</style>
 </head>
 <body>
 <div id="banner">
   <span>scoobyLog v{VERSION} — Incident Response Report</span>
-  <span>{incident_id}</span>
+  <span>{title}</span>
 </div>
 <div id="content">
-<div id="md-source" style="display:none">{escaped}</div>
-<div id="rendered"></div>
+<div id="md-source" hidden>{escaped}</div>
+<div id="rendered"><noscript><p class="notice">Questo report richiede JavaScript per essere impaginato.</p></noscript></div>
 </div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
-<script>
-  marked.setOptions({{
-    highlight: function(code, lang) {{
-      const l = hljs.getLanguage(lang) ? lang : 'plaintext';
-      return hljs.highlight(code, {{language: l}}).value;
-    }},
-    breaks: true, gfm: true
-  }});
-  const src = document.getElementById('md-source').textContent;
-  document.getElementById('rendered').innerHTML = marked.parse(src);
-  document.querySelectorAll('pre code').forEach(el => hljs.highlightElement(el));
-</script>
+<script src="{_MARKED_URL}" integrity="{_MARKED_SRI}" crossorigin="anonymous"></script>
+<script src="{_HLJS_URL}" integrity="{_HLJS_SRI}" crossorigin="anonymous"></script>
+<script>{_REPORT_SCRIPT}</script>
 </body>
 </html>"""
 
@@ -1646,8 +1865,8 @@ def generate_report(
         t_end    = df["_timestamp_parsed"].max()
         duration = t_end - t_start
         time_range = (
-            f"`{fmt_ts(t_start)}` → `{fmt_ts(t_end)}`  "
-            f"*(durata: `{fmt_duration(duration)}`)*"
+            f"{md_code(fmt_ts(t_start))} → {md_code(fmt_ts(t_end))}  "
+            f"*(durata: {md_code(fmt_duration(duration))})*"
         )
     else:
         t_start = t_end = duration = None
@@ -1773,14 +1992,14 @@ def generate_report(
     )
     tldr_severity = severity["grade"] if severity else "N/D"
     tldr_lines = [
-        f"- **Incidente**: `{error_events}` errori in `{fmt_duration(duration) if duration is not None else 'N/D'}`",
-        f"- **Severity**: `{tldr_severity}` ({(severity or {}).get('score', 'N/D')}/100)",
-        f"- **Root cause**: `{rc_level}` @ `{rc_time_str}` su `{rc_event.get('host', 'N/A')}`",
+        f"- **Incidente**: {md_code(error_events)} errori in {md_code(fmt_duration(duration) if duration is not None else 'N/D')}",
+        f"- **Severity**: {md_code(tldr_severity)} ({(severity or {}).get('score', 'N/D')}/100)",
+        f"- **Root cause**: {md_code(rc_level)} @ {md_code(rc_time_str)} su {md_code(rc_event.get('host', 'N/A'))}",
         f"- **Causa**: {_causa_label}",
-        f"- **Confidenza RCA**: `{rc_confidence['label']}` — {rc_confidence['reason']}",
-        f"- **MTTR**: `{fmt_duration(mttr) if mttr else 'non recuperato'}`",
-        f"- **Flusso critico**: `{root_cause['flow_key']}`",
-        f"- **Host coinvolti**: `{host_count}`",
+        f"- **Confidenza RCA**: {md_code(rc_confidence['label'])} — {rc_confidence['reason']}",
+        f"- **MTTR**: {md_code(fmt_duration(mttr) if mttr else 'non recuperato')}",
+        f"- **Flusso critico**: {md_code(root_cause['flow_key'])}",
+        f"- **Host coinvolti**: {md_code(host_count)}",
     ]
     if sla_breach:
         tldr_lines.append(f"- {sla_breach}")
@@ -1788,7 +2007,7 @@ def generate_report(
 
     # MTTR block
     if mttr is not None:
-        mttr_line = f"| MTTR (Time to Recover) | `{fmt_duration(mttr)}` |"
+        mttr_line = f"| MTTR (Time to Recover) | {md_code(fmt_duration(mttr), cell=True)} |"
     else:
         mttr_line = "| MTTR (Time to Recover) | `N/D — nessun evento di recovery rilevato` |"
 
@@ -1816,7 +2035,7 @@ def generate_report(
     # Burst analysis section (with z-score)
     if bursts:
         burst_rows = "\n".join(
-            f"| `{b['start']}` | `{b['end']}` | {b['events']} | {b['errors']} | {b['rate_factor']}x | z={b['z_score']} |"
+            f"| {md_code(b['start'], cell=True)} | {md_code(b['end'], cell=True)} | {b['events']} | {b['errors']} | {b['rate_factor']}x | z={b['z_score']} |"
             for b in bursts
         )
         burst_block = (
@@ -1836,7 +2055,7 @@ def generate_report(
     # Log gap section (with gap_factor)
     if log_gaps:
         gap_rows = "\n".join(
-            f"| `{g['from']}` | `{g['to']}` | **{g['gap_minutes']} min** | {g.get('gap_factor', 'N/A')}× p75 |"
+            f"| {md_code(g['from'], cell=True)} | {md_code(g['to'], cell=True)} | **{g['gap_minutes']} min** | {g.get('gap_factor', 'N/A')}× p75 |"
             for g in log_gaps
         )
         gap_block = (
@@ -1907,7 +2126,7 @@ def generate_report(
     for key, values in network_evidence.items():
         if values:
             label = net_label_map.get(key, key.replace("_", " ").title())
-            items = "\n".join(f"  - `{v}`" for v in values[:30])
+            items = "\n".join(f"  - {md_code(v)}" for v in values[:30])
             net_sections.append(f"### {label}\n{items}")
     net_block = "\n\n".join(net_sections) if net_sections else "_Nessuna evidenza di rete estratta._"
 
@@ -1931,7 +2150,7 @@ def generate_report(
                       if not k.startswith("_") and pd.notna(v)}
             block  = "\n".join(f"  {k}: {str(v)[:200]}" for k, v in fields.items())
         raw_log_blocks.append(
-            f"**Evento Errore #{i}** — `{ts_str}` — `{lvl}`\n```\n{block}\n```"
+            f"**Evento Errore #{i}** — {md_code(ts_str)} — {md_code(lvl)}\n{md_fence(block)}"
         )
     raw_logs_section = "\n\n".join(raw_log_blocks) if raw_log_blocks else "_Nessun evento errore trovato._"
 
@@ -1948,8 +2167,8 @@ def generate_report(
     if mttr is not None:
         exec_summary_lines.append(f"Il sistema si è ripristinato in **{fmt_duration(mttr)}** dal primo errore.")
     exec_summary_lines.append(
-        f"La **root cause** è l'evento `{rc_level}` registrato a `{rc_time_str}` "
-        f"su `{rc_event.get('host', 'host sconosciuto')}`, con tags: _{rc_tags_str}_."
+        f"La **root cause** è l'evento {md_code(rc_level)} registrato a {md_code(rc_time_str)} "
+        f"su {md_code(rc_event.get('host', 'host sconosciuto'))}, con tags: _{rc_tags_str}_."
     )
     exec_summary = "\n\n".join(exec_summary_lines)
 
@@ -1961,6 +2180,21 @@ def generate_report(
     dup_note = f" ({duplicate_count} eventi duplicati rilevati)" if duplicate_count > 0 else ""
 
     # -----------------------------------------------------------------------
+    # The root-cause block is assembled here, not inside the template, so that the
+    # fence can be sized on its content: the event fields are raw log data.
+    rc_event_block = md_fence("\n".join([
+        f"Timestamp   : {rc_time_str}",
+        f"Livello     : {rc_level}",
+        f"Flusso      : {root_cause['flow_key']}",
+        f"Tags        : {rc_tags_str}",
+        f"Cascade     : {cascade} errori successivi entro 5 minuti",
+        f"MTTR        : {fmt_duration(mttr) if mttr else 'N/D'}",
+        f"Confidenza  : {rc_confidence['label']} — {rc_confidence['reason']}",
+        "",
+        "--- Campi evento ---",
+        rc_raw,
+    ]))
+
     report = f"""# Incident Response Report
 
 ---
@@ -1970,10 +2204,10 @@ def generate_report(
 | Campo | Valore |
 |---|---|
 | **Incident ID** | `IR-{incident_id}` |
-| **Data Analisi** | `{now}` |
-| **Sorgente Dati** | `{source_file}` |
-| **MD5 Sorgente** | `{file_hash}` |
-| **SHA-256 Sorgente** | `{sha256}` |
+| **Data Analisi** | {md_code(now, cell=True)} |
+| **Sorgente Dati** | {md_code(source_file, cell=True)} |
+| **MD5 Sorgente** | {md_code(file_hash, cell=True)} |
+| **SHA-256 Sorgente** | {md_code(sha256, cell=True)} |
 | **Analista** | Script Automatico — scoobyLog v{VERSION} |
 | **Classificazione** | {severity_label} |
 {severity_block}
@@ -1993,18 +2227,18 @@ def generate_report(
 | Campo | Valore |
 |---|---|
 | **Incident ID** | `IR-{incident_id}` |
-| **Severity** | `{tldr_severity}` ({(severity or {}).get('score', 'N/D')}/100) |
+| **Severity** | {md_code(tldr_severity, cell=True)} ({(severity or {}).get('score', 'N/D')}/100) |
 | **Classificazione** | {severity_label} |
-| **Root Cause** | `{rc_level}` @ `{rc_time_str}` su `{rc_event.get('host', 'N/A')}` |
+| **Root Cause** | {md_code(rc_level, cell=True)} @ {md_code(rc_time_str, cell=True)} su {md_code(rc_event.get('host', 'N/A'), cell=True)} |
 | **Causa** | {_causa_label} |
-| **MTTR** | `{fmt_duration(mttr) if mttr else 'non recuperato'}` |
+| **MTTR** | {md_code(fmt_duration(mttr) if mttr else 'non recuperato', cell=True)} |
 | **Trend** | {trend_str} |
 | **Service Impact** | {_worst_svc_md} |
-| **Host impattati** | `{host_count}` |
-| **Errori totali** | `{error_events}` |
-| **Cascata** | `{cascade}` errori downstream |
-| **Confidenza RCA** | `{rc_confidence['label']}` — {rc_confidence['reason']} |
-| **Flusso critico** | `{root_cause['flow_key']}` |
+| **Host impattati** | {md_code(host_count, cell=True)} |
+| **Errori totali** | {md_code(error_events, cell=True)} |
+| **Cascata** | {md_code(cascade, cell=True)} errori downstream |
+| **Confidenza RCA** | {md_code(rc_confidence['label'], cell=True)} — {rc_confidence['reason']} |
+| **Flusso critico** | {md_code(root_cause['flow_key'], cell=True)} |
 | **Analizzato da** | scoobyLog v{VERSION} |
 {f"| **SLA** | {sla_breach} |" if sla_breach else ""}
 
@@ -2024,13 +2258,13 @@ def generate_report(
 
 | Metrica | Valore |
 |---|---|
-| Totale eventi analizzati | `{total_events}`{dup_note} |
+| Totale eventi analizzati | {md_code(total_events, cell=True)}{dup_note} |
 | Intervallo temporale | {time_range} |
-| Flussi/sessioni unici (`{flow_key or "N/A"}`) | `{unique_flows}` |
-| Host coinvolti | `{host_count}` |
-| Eventi ERROR/CRITICAL/FATAL | `{error_events}` |
-| Eventi WARNING | `{warning_events}` |
-| Totale anomalie rilevate | `{anomaly_events}` |
+| Flussi/sessioni unici ({md_code(flow_key or "N/A", cell=True)}) | {md_code(unique_flows, cell=True)} |
+| Host coinvolti | {md_code(host_count, cell=True)} |
+| Eventi ERROR/CRITICAL/FATAL | {md_code(error_events, cell=True)} |
+| Eventi WARNING | {md_code(warning_events, cell=True)} |
+| Totale anomalie rilevate | {md_code(anomaly_events, cell=True)} |
 | Percentuale eventi anomali | `{100 * anomaly_events / total_events:.1f}%` |
 {mttr_line}
 | Trend incidente | {trend_str} |
@@ -2071,13 +2305,13 @@ def generate_report(
 
 ## 5. Analisi per Flusso / Chiave Univoca
 
-**Chiave di flusso rilevata**: `{flow_key or "N/A"}`
+**Chiave di flusso rilevata**: {md_code(flow_key or "N/A")}
 
 Flussi ordinati per numero di errori:
 
 {flow_table}
 
-### 5.1 Flusso più critico — `{root_cause['flow_key']}`
+### 5.1 Flusso più critico — {md_code(root_cause['flow_key'])}
 
 {flow_detail}
 
@@ -2146,18 +2380,7 @@ Gli estratti seguenti sono i log originali non modificati degli eventi di errore
 
 ### 13.1 Evento Root Cause
 
-```
-Timestamp   : {rc_time_str}
-Livello     : {rc_level}
-Flusso      : {root_cause['flow_key']}
-Tags        : {rc_tags_str}
-Cascade     : {cascade} errori successivi entro 5 minuti
-MTTR        : {fmt_duration(mttr) if mttr else "N/D"}
-Confidenza  : {rc_confidence['label']} — {rc_confidence['reason']}
-
---- Campi evento ---
-{rc_raw}
-```
+{rc_event_block}
 
 {f"> {sla_breach}" if sla_breach else ""}
 
@@ -2177,18 +2400,18 @@ Basandosi sull'analisi automatica dei pattern, le cause radice identificate sono
 
 {cause_list}
 
-> **Conclusione tecnica**: L'evento iniziale a `{rc_time_str}` su `{rc_event.get('host', 'N/A')}` ha
+> **Conclusione tecnica**: L'evento iniziale a {md_code(rc_time_str)} su {md_code(rc_event.get('host', 'N/A'))} ha
 > innescato la sequenza di fallimenti documentata. Confidenza RCA: **{rc_confidence['label']}**.
 > Il documento costituisce evidenza tecnica per il ticket.
 >
-> Riferimento univoco: **IR-{incident_id}** — generato `{now}`
+> Riferimento univoco: **IR-{incident_id}** — generato {md_code(now)}
 
 ---
 
 ## 14. Azioni Raccomandate
 
-1. **Immediato** — Verificare lo stato del servizio/host nel flusso `{root_cause['flow_key']}`.
-2. **Breve termine** — Analizzare i log di sistema intorno a `{rc_time_str}` ±10 minuti.
+1. **Immediato** — Verificare lo stato del servizio/host nel flusso {md_code(root_cause['flow_key'])}.
+2. **Breve termine** — Analizzare i log di sistema intorno a {md_code(rc_time_str)} ±10 minuti.
 3. **Investigazione** — Correlare con metriche infrastrutturali (CPU, RAM, rete, IOPS) per lo stesso periodo.
 4. **Prevenzione** — Aggiornare le soglie di alerting Splunk per i pattern: _{", ".join(all_df_tags[:5]) or "N/A"}_.
 5. **Post-mortem** — Documentare la catena causale e validare il runbook di risposta.
@@ -2204,23 +2427,21 @@ Basandosi sull'analisi automatica dei pattern, le cause radice identificate sono
 
 ### 15.1 Colonne CSV Analizzate
 
-```
-{chr(10).join("  - " + c for c in df.columns if not c.startswith("_"))}
-```
+{md_fence(chr(10).join("  - " + _LINE_BREAKS_RE.sub(" ", str(c)) for c in df.columns if not str(c).startswith("_")))}
 
 ### 15.2 Parametri di Analisi
 
 | Parametro | Valore |
 |---|---|
-| File sorgente | `{source_file}` |
-| Hash file | `{file_hash}` |
-| Colonna timestamp | `{args.timestamp_col or "auto-rilevata"}` |
-| Colonna log level | `{args.level_col or "auto-rilevata"}` |
-| Chiave flusso | `{flow_key or "auto-rilevata"}` |
-| Valore flusso target | `{args.flow_value or "auto-selezionato (più critico)"}` |
-| Campo _raw Splunk | `{"presente" if has_raw_col else "assente — campi strutturati usati"}` |
-| Versione script | `{VERSION}` |
-| SHA-256 file sorgente | `{sha256}` |
+| File sorgente | {md_code(source_file, cell=True)} |
+| Hash file | {md_code(file_hash, cell=True)} |
+| Colonna timestamp | {md_code(args.timestamp_col or "auto-rilevata", cell=True)} |
+| Colonna log level | {md_code(args.level_col or "auto-rilevata", cell=True)} |
+| Chiave flusso | {md_code(flow_key or "auto-rilevata", cell=True)} |
+| Valore flusso target | {md_code(args.flow_value or "auto-selezionato (più critico)", cell=True)} |
+| Campo _raw Splunk | {md_code("presente" if has_raw_col else "assente — campi strutturati usati", cell=True)} |
+| Versione script | {md_code(VERSION, cell=True)} |
+| SHA-256 file sorgente | {md_code(sha256, cell=True)} |
 
 ### 15.3 Splunk SPL — Query di Riproduzione
 
@@ -2228,7 +2449,7 @@ Tre query mirate per la verifica rapida dell'incidente in Splunk:
 
 {spl_query}
 
-> **Chain of custody**: Il file analizzato (`{source_file}`) ha hash SHA-256 `{sha256}`.
+> **Chain of custody**: Il file analizzato ({md_code(source_file)}) ha hash SHA-256 {md_code(sha256)}.
 > Il report è stato generato in modo deterministico e riproducibile. Incident ID: **IR-{incident_id}**.
 
 ---
@@ -2645,9 +2866,9 @@ def render_local_ai_section(ai_result):
     ok and error results so the report always documents what happened."""
     lines = ["## 13.5 AI Local RCA Review (sperimentale)", ""]
     lines.append(
-        f"> Provider: `{ai_result.get('provider', 'N/D')}` · "
-        f"Modello: `{ai_result.get('model', 'N/D')}` · "
-        f"Endpoint: `{ai_result.get('endpoint', 'N/D')}` · "
+        f"> Provider: {md_code(ai_result.get('provider', 'N/D'))} · "
+        f"Modello: {md_code(ai_result.get('model', 'N/D'))} · "
+        f"Endpoint: {md_code(ai_result.get('endpoint', 'N/D'))} · "
         f"Stato: **{ai_result.get('status', 'N/D')}**"
     )
     lines.append("")
@@ -2913,7 +3134,7 @@ def render_diagnosis_section(diag) -> str:
     lines = ["### 13.6 Diagnosi Intelligente", ""]
     lines.append(f"**Problema individuato:** {diag.get('problema', 'N/D')}")
     lines.append("")
-    lines.append(f"**Confidenza:** `{diag.get('confidenza', 'N/D')}` · Fonte: _{diag.get('fonte', 'N/D')}_")
+    lines.append(f"**Confidenza:** {md_code(diag.get('confidenza', 'N/D'))} · Fonte: _{diag.get('fonte', 'N/D')}_")
     lines.append("")
     evidenze = diag.get("evidenze") or []
     if evidenze:
@@ -2922,10 +3143,10 @@ def render_diagnosis_section(diag) -> str:
         lines.append("| # | Timestamp | Host | Estratto | Rilevanza |")
         lines.append("|---|---|---|---|---|")
         for i, ev in enumerate(evidenze, 1):
-            excerpt = str(ev.get("estratto", ""))[:_DIAG_EXCERPT_MAXLEN].replace("|", "¦")
+            excerpt = md_text(ev.get("estratto", ""), _DIAG_EXCERPT_MAXLEN, cell=True)
             lines.append(
-                f"| {i} | `{ev.get('timestamp', 'N/D')}` | `{ev.get('host', 'N/D')}` "
-                f"| {excerpt} | {str(ev.get('rilevanza', '')).replace('|', '¦')} |"
+                f"| {i} | {md_code(ev.get('timestamp', 'N/D'), cell=True)} | {md_code(ev.get('host', 'N/D'), cell=True)} "
+                f"| {excerpt} | {md_text(ev.get('rilevanza', ''), cell=True)} |"
             )
         lines.append("")
     else:
